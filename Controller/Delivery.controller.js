@@ -6,9 +6,9 @@ const pool = new Pool({
   host: process.env.PGHOST,
   port: process.env.PGPORT,
   database: process.env.PGDATABASE,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  // ssl: {
+  //   rejectUnauthorized: false,
+  // },
 });
 const { getNextSequenceNumber } = require('../utils/sequence');
 
@@ -157,7 +157,7 @@ exports.getChallanById = async (req, res) => {
     // Step 2: Fetch latest price & per_case from all dynamic tables
     // We need to query every product_type table that might contain these products
     const typesResult = await pool.query('SELECT product_type FROM public.products');
-    const typeTables = typesResult.rows.map(t => 
+    const typeTables = typesResult.rows.map(t =>
       t.product_type.toLowerCase().replace(/\s+/g, '_')
     );
 
@@ -165,16 +165,20 @@ exports.getChallanById = async (req, res) => {
 
     // Query each table (this is acceptable since number of product_types is small)
     for (const tbl of typeTables) {
-      const rows = await pool.query(`
-        SELECT 
-          productname,
-          price AS rate_per_box,
-          per_case
-        FROM public.${tbl}
-        WHERE productname = ANY($1)
-      `, [productNames]);
+      try {
+        const rows = await pool.query(`
+          SELECT 
+            productname,
+            price AS rate_per_box,
+            per_case
+          FROM public."${tbl}"
+          WHERE productname = ANY($1)
+        `, [productNames]);
 
-      masterRows.push(...rows.rows);
+        masterRows.push(...rows.rows);
+      } catch (tableErr) {
+        // Ignore missing type table
+      }
     }
 
     // Build lookup map: productname → { rate_per_box, per_case }

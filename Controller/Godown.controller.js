@@ -1,5 +1,6 @@
 const { Pool } = require('pg');
 const ExcelJS = require('exceljs');
+const PDFDocument = require('pdfkit');
 
 const pool = new Pool({
   user: process.env.PGUSER,
@@ -7,9 +8,9 @@ const pool = new Pool({
   host: process.env.PGHOST,
   port: process.env.PGPORT,
   database: process.env.PGDATABASE,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  // ssl: {
+  //   rejectUnauthorized: false,
+  // },
 });
 
 exports.addGodown = async (req, res) => {
@@ -229,20 +230,34 @@ exports.getStockByGodown = async (req, res) => {
 
     if (typesRes.rows.length === 0) return res.json([]);
 
+    // Check which tables actually exist in public schema to prevent relation does not exist error
+    const tablesRes = await pool.query(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public'
+    `);
+    const existingTables = new Set(tablesRes.rows.map(r => r.table_name.toLowerCase()));
+
     const productTypes = typesRes.rows.map(r => r.product_type);
     let joins = '';
     const params = [godown_id];
     let idx = 2;
+    const priceCoalesce = [];
 
     productTypes.forEach(type => {
-      const table = type.toLowerCase().replace(/\s+/g, '_');
-      joins += `
-        LEFT JOIN public."${table}" p${idx}
-          ON LOWER(s.productname) = LOWER(p${idx}.productname)
-          AND LOWER(s.brand) = LOWER(p${idx}.brand)
-      `;
-      idx++;
+      const table = (type || 'general').toLowerCase().replace(/\s+/g, '_');
+      if (existingTables.has(table)) {
+        joins += `
+          LEFT JOIN public."${table}" p${idx}
+            ON LOWER(s.productname) = LOWER(p${idx}.productname)
+            AND LOWER(s.brand) = LOWER(p${idx}.brand)
+        `;
+        priceCoalesce.push(`CAST(p${idx}.price AS NUMERIC)`);
+        idx++;
+      }
     });
+
+    const priceExpression = priceCoalesce.length > 0 ? `COALESCE(${priceCoalesce.join(', ')}, 0)` : '0';
 
     const finalQuery = `
       SELECT 
@@ -252,10 +267,7 @@ exports.getStockByGodown = async (req, res) => {
         s.brand,
         s.per_case,
         s.current_cases,
-        COALESCE(
-          ${productTypes.map((_, i) => `CAST(p${i + 2}.price AS NUMERIC)`).join(', ')}, 
-          0
-        )::NUMERIC AS rate_per_box,
+        ${priceExpression}::NUMERIC AS rate_per_box,
         g.name AS godown_name,
         COALESCE(b.agent_name, '-') AS agent_name
       FROM public.stock s
@@ -269,7 +281,7 @@ exports.getStockByGodown = async (req, res) => {
     const result = await pool.query(finalQuery, params);
     res.json(result.rows);
   } catch (err) {
-    console.error('getStockByGodown:', err.message);
+    console.error('getStockByGodown error:', err.message);
     res.status(500).json({ message: 'Failed to fetch stock' });
   }
 };
@@ -311,9 +323,10 @@ exports.takeStockFromGodown = async (req, res) => {
       [newCases, newTakenCases, stock_id]
     );
 
+    const takenBy = req.body.taken_by || req.body.performed_by || req.body.username || 'Unknown';
     await client.query(
-      'INSERT INTO public.stock_history (stock_id, action, cases, per_case_total) VALUES ($1, $2, $3, $4)',
-      [stock_id, 'taken', parseInt(cases_taken), parseInt(cases_taken) * per_case]
+      'INSERT INTO public.stock_history (stock_id, action, cases, per_case_total, added_by, taken_by) VALUES ($1, $2, $3, $4, $5, $5)',
+      [stock_id, 'taken', parseInt(cases_taken), parseInt(cases_taken) * per_case, takenBy]
     );
 
     await client.query('COMMIT');
@@ -444,11 +457,11 @@ exports.exportGodownStockToExcel = async (req, res) => {
       ];
 
       historyResult.rows.forEach((row, index) => {
-        const formattedDate = row.date 
+        const formattedDate = row.date
           ? new Date(row.date).toLocaleString('en-IN', {
-              day: '2-digit', month: 'short', year: 'numeric',
-              hour: '2-digit', minute: '2-digit', hour12: true
-            })
+            day: '2-digit', month: 'short', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', hour12: true
+          })
           : '-';
 
         // Performed By: prioritize taken_by for OUT, added_by for IN
@@ -694,12 +707,23 @@ exports.deleteStockEntry = async (req, res) => {
 exports.transferStock = async (req, res) => {
   const client = await pool.connect();
   try {
-    const { source_stock_id, target_godown_id, cases_transferred, transfer_date, added_by } = req.body;
+    const {
+      source_stock_id,
+      target_godown_id,
+      cases_transferred,
+      transfer_date,
+      added_by,
+      // Challan fields
+      transport_name,
+      lr_number,
+      delivery_person,
+      from_place,
+      to_place,
+    } = req.body;
 
     if (!source_stock_id || !target_godown_id || !cases_transferred || parseInt(cases_transferred) <= 0) {
       return res.status(400).json({ message: 'Invalid input' });
     }
-
     if (!added_by) {
       return res.status(400).json({ message: 'Added by (username) is required' });
     }
@@ -756,13 +780,13 @@ exports.transferStock = async (req, res) => {
     // ─── History for SOURCE (taken) ─────────────────────────────────────
     await client.query(
       `INSERT INTO public.stock_history 
-       (stock_id, action, cases, per_case_total, added_by, customer_name, date)
-       VALUES ($1, 'taken', $2, $3, $4, $5, COALESCE($6, CURRENT_TIMESTAMP))`,
+       (stock_id, action, cases, per_case_total, added_by, taken_by, customer_name, date)
+       VALUES ($1, 'taken', $2, $3, $4, $4, $5, COALESCE($6, CURRENT_TIMESTAMP))`,
       [
         source_stock_id,
         parseInt(cases_transferred),
         perCaseTotal,
-        added_by,                                 // who did the transfer
+        added_by,
         `TRANSFERRED TO ${targetName.replace(/_/g, ' ').toUpperCase()}`,
         customDate
       ]
@@ -836,13 +860,308 @@ exports.transferStock = async (req, res) => {
       ]
     );
 
+    // ─── Create Transfer Challan Record ─────────────────────────────────
+    let challan_id = null;
+    let challan_number = null;
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS public.godown_transfer_challans (
+          id SERIAL PRIMARY KEY,
+          challan_number TEXT UNIQUE,
+          transfer_date DATE DEFAULT CURRENT_DATE,
+          source_godown_id INTEGER,
+          target_godown_id INTEGER,
+          source_godown_name TEXT,
+          target_godown_name TEXT,
+          product_details JSONB DEFAULT '[]',
+          transport_name TEXT,
+          lr_number TEXT,
+          delivery_person TEXT,
+          performed_by TEXT,
+          from_place TEXT,
+          to_place TEXT,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      `);
+      await client.query(`CREATE SEQUENCE IF NOT EXISTS challan_sequence START 1`);
+      const seqRes = await client.query(`SELECT nextval('challan_sequence') AS seq`);
+      challan_number = `CHN-${String(seqRes.rows[0].seq).padStart(4, '0')}`;
+
+      const productDetails = [{
+        productname: source.productname,
+        brand: source.brand,
+        product_type: source.product_type,
+        cases: parseInt(cases_transferred),
+        per_case: source.per_case,
+        total_qty: perCaseTotal
+      }];
+
+      const challanRes = await client.query(
+        `INSERT INTO public.godown_transfer_challans
+         (challan_number, transfer_date, source_godown_id, target_godown_id, source_godown_name,
+          target_godown_name, product_details, transport_name, lr_number, delivery_person,
+          performed_by, from_place, to_place)
+         VALUES ($1, COALESCE($2, CURRENT_DATE), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         RETURNING id`,
+        [
+          challan_number,
+          customDate,
+          source.godown_id,
+          target_godown_id,
+          sourceName,
+          targetName,
+          JSON.stringify(productDetails),
+          transport_name || null,
+          lr_number || null,
+          delivery_person || null,
+          added_by,
+          from_place || sourceName.replace(/_/g, ' ').toUpperCase(),
+          to_place || targetName.replace(/_/g, ' ').toUpperCase()
+        ]
+      );
+      challan_id = challanRes.rows[0].id;
+    } catch (challanErr) {
+      console.log('Challan creation log:', challanErr.message);
+    }
+
     await client.query('COMMIT');
-    res.status(200).json({ message: 'Transfer successful' });
+    res.status(200).json({ message: 'Transfer successful', challan_id, challan_number });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Error in transferStock:', err.message);
     res.status(500).json({ message: 'Failed to transfer', error: err.message });
   } finally {
     client.release();
+  }
+};
+
+// ─── Get All Transfer Challans ────────────────────────────────────────────────
+exports.getTransferChallans = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM public.godown_transfer_challans
+      ORDER BY created_at DESC
+    `);
+    res.json(result.rows.map(r => ({
+      ...r,
+      product_details: typeof r.product_details === 'string' ? JSON.parse(r.product_details) : r.product_details || []
+    })));
+  } catch (err) {
+    console.error('getTransferChallans error:', err.message);
+    res.status(500).json({ message: 'Failed to fetch challans' });
+  }
+};
+
+// ─── Generate Transfer Challan PDF ───────────────────────────────────────────
+const generateChallanPDF = (challan) => {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const cap = s => (s || '').replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    const products = typeof challan.product_details === 'string' ? JSON.parse(challan.product_details) : challan.product_details || [];
+
+    // Header
+    doc.fontSize(20).font('Helvetica-Bold').fillColor('#0f172a').text('GODOWN TRANSFER CHALLAN', { align: 'center' });
+    doc.fontSize(9).font('Helvetica').fillColor('#64748b').text('OFFICIAL STOCK TRANSFER DOCUMENT', { align: 'center' }).moveDown(0.5);
+    doc.moveTo(40, doc.y).lineTo(555, doc.y).lineWidth(1).strokeColor('#cbd5e1').stroke().moveDown(0.8);
+
+    // Challan info row
+    const infoY = doc.y;
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#0f172a').text(`Challan No: ${challan.challan_number || 'N/A'}`, 40, infoY);
+    doc.font('Helvetica').fontSize(10).fillColor('#334155').text(`Date: ${fmtDate(challan.transfer_date)}`, 400, infoY, { align: 'right', width: 155 });
+    doc.moveDown(1.5);
+
+    // From / To section
+    const boxY = doc.y;
+    doc.rect(40, boxY, 245, 65).fillColor('#f8fafc').fill().strokeColor('#cbd5e1').stroke();
+    doc.rect(305, boxY, 250, 65).fillColor('#f8fafc').fill().strokeColor('#cbd5e1').stroke();
+    doc.fillColor('#0f172a');
+
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('#64748b').text('SOURCE / FROM GODOWN', 50, boxY + 8);
+    doc.font('Helvetica-Bold').fontSize(12).fillColor('#0f172a').text(cap(challan.source_godown_name), 50, boxY + 22);
+    doc.font('Helvetica').fontSize(9).fillColor('#475569').text(challan.from_place || cap(challan.source_godown_name), 50, boxY + 40);
+
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('#64748b').text('DESTINATION / TO GODOWN', 315, boxY + 8);
+    doc.font('Helvetica-Bold').fontSize(12).fillColor('#0f172a').text(cap(challan.target_godown_name), 315, boxY + 22);
+    doc.font('Helvetica').fontSize(9).fillColor('#475569').text(challan.to_place || cap(challan.target_godown_name), 315, boxY + 40);
+
+    doc.fillColor('#0f172a').moveDown(0.5);
+    doc.y = boxY + 75;
+    doc.moveDown(1);
+
+    // Product table
+    const tY = doc.y;
+    const cols = [35, 165, 70, 55, 55, 60, 70];
+    const headers = ['S.No', 'Product Name', 'Brand', 'Type', 'Cases', 'Per Case', 'Total Qty'];
+    const rowH = 22;
+    let cx = 40;
+    // Header row
+    doc.rect(40, tY, 515, rowH).fillColor('#1e293b').fill();
+    doc.fillColor('white').font('Helvetica-Bold').fontSize(9);
+    headers.forEach((h, i) => {
+      doc.text(h, cx + 3, tY + 6, { width: cols[i] - 6, align: 'center' });
+      cx += cols[i];
+    });
+
+    let rowY = tY + rowH;
+    doc.fillColor('#0f172a').font('Helvetica').fontSize(9);
+    products.forEach((p, i) => {
+      const bg = i % 2 === 0 ? '#f8fafc' : '#ffffff';
+      doc.rect(40, rowY, 515, rowH).fillColor(bg).fill().strokeColor('#e2e8f0').stroke();
+      cx = 40;
+      doc.fillColor('#334155');
+      const row = [
+        String(i + 1),
+        p.productname || '',
+        p.brand || '',
+        cap(p.product_type || ''),
+        String(p.cases || 0),
+        String(p.per_case || 0),
+        String(p.total_qty || 0)
+      ];
+      row.forEach((cell, ci) => {
+        doc.text(cell, cx + 3, rowY + 6, { width: cols[ci] - 6, align: 'center' });
+        cx += cols[ci];
+      });
+      rowY += rowH;
+    });
+    doc.moveDown(0.5);
+    // Transport details box
+    const transY = rowY + 15;
+    doc.rect(40, transY, 515, 55).fillColor('#f8fafc').fill().strokeColor('#cbd5e1').stroke();
+    doc.font('Helvetica-Bold').fontSize(10).fillColor('#0f172a').text('TRANSPORT & DELIVERY DETAILS', 50, transY + 8);
+    
+    doc.font('Helvetica').fontSize(9).fillColor('#334155');
+    doc.text(`Transport / Vehicle: ${challan.transport_name || '—'}`, 50, transY + 25);
+    doc.text(`LR / Receipt No: ${challan.lr_number || '—'}`, 230, transY + 25);
+    doc.text(`Delivery Person: ${challan.delivery_person || '—'}`, 400, transY + 25);
+
+    // Signature area
+    const sigY = transY + 85;
+    doc.font('Helvetica').fontSize(8).fillColor('#64748b');
+    doc.text('Prepared By', 40, sigY);
+    doc.text('Delivery Person Signature', 200, sigY);
+    doc.text('Receiver\'s Signature', 420, sigY);
+    doc.moveTo(40, sigY + 25).lineTo(160, sigY + 25).strokeColor('#94a3b8').stroke();
+    doc.moveTo(200, sigY + 25).lineTo(380, sigY + 25).stroke();
+    doc.moveTo(420, sigY + 25).lineTo(555, sigY + 25).stroke();
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#0f172a');
+    doc.text(challan.performed_by || '—', 40, sigY + 30);
+    doc.text(challan.delivery_person || '—', 200, sigY + 30);
+
+    // Footer
+    doc.fontSize(8).fillColor('#94a3b8').font('Helvetica')
+      .text(`Generated on ${new Date().toLocaleString('en-IN')} | Challan: ${challan.challan_number}`, 40, 790, { align: 'center', width: 515 });
+
+    doc.end();
+  });
+};
+
+exports.getTransferChallanPDF = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(`SELECT * FROM public.godown_transfer_challans WHERE id = $1`, [id]);
+    if (result.rows.length === 0) return res.status(404).json({ message: 'Challan not found' });
+    const challan = result.rows[0];
+    const pdfBuffer = await generateChallanPDF(challan);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename=challan-${challan.challan_number}.pdf`);
+    res.send(pdfBuffer);
+  } catch (err) {
+    console.error('getTransferChallanPDF error:', err.message);
+    res.status(500).json({ message: 'Failed to generate PDF' });
+  }
+};
+
+// ─── Godown Snapshot at a specific date ────────────────────────────────────────
+exports.getGodownSnapshot = async (req, res) => {
+  const { godown_id } = req.params;
+  const { date } = req.query; // YYYY-MM-DD
+
+  try {
+    // Get all stock items for this godown
+    const stockRes = await pool.query(
+      `SELECT s.id, s.productname, s.brand, s.product_type, s.per_case, s.date_added
+       FROM public.stock s
+       WHERE s.godown_id = $1
+       ORDER BY s.productname`,
+      [godown_id]
+    );
+
+    if (!date) {
+      // Return current stock with date_added info
+      const curr = await pool.query(
+        `SELECT s.id, s.productname, s.brand, s.product_type, s.per_case, s.current_cases, s.date_added,
+                COALESCE(b.agent_name, '-') AS agent_name
+         FROM public.stock s
+         LEFT JOIN public.brand b ON s.brand = b.name
+         WHERE s.godown_id = $1
+         ORDER BY s.productname`,
+        [godown_id]
+      );
+      return res.json({ snapshot_date: 'current', stocks: curr.rows });
+    }
+
+    // Reconstruct stock levels at a given date using history
+    const snapshotDate = new Date(date);
+    snapshotDate.setHours(23, 59, 59, 999);
+
+    const snapStocks = [];
+    for (const s of stockRes.rows) {
+      const histRes = await pool.query(
+        `SELECT action, cases FROM public.stock_history
+         WHERE stock_id = $1 AND date <= $2
+         ORDER BY date`,
+        [s.id, snapshotDate.toISOString()]
+      );
+
+      let snapshotCases = 0;
+      for (const h of histRes.rows) {
+        if (h.action === 'added') snapshotCases += h.cases;
+        else if (h.action === 'taken') snapshotCases -= h.cases;
+      }
+
+      if (snapshotCases > 0 || histRes.rows.length > 0) {
+        snapStocks.push({
+          ...s,
+          current_cases: Math.max(snapshotCases, 0),
+          history_entries: histRes.rows.length
+        });
+      }
+    }
+
+    res.json({ snapshot_date: date, stocks: snapStocks });
+  } catch (err) {
+    console.error('getGodownSnapshot error:', err.message);
+    res.status(500).json({ message: 'Failed to get snapshot' });
+  }
+};
+
+// ─── Godown Summary Report (all godowns, all stock) ────────────────────────────
+exports.getGodownSummaryReport = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        g.id AS godown_id,
+        g.name AS godown_name,
+        COUNT(DISTINCT s.id) AS unique_products,
+        COALESCE(SUM(s.current_cases), 0) AS total_cases,
+        COALESCE(SUM(s.taken_cases), 0) AS total_taken,
+        MAX(s.date_added) AS last_stock_in,
+        MAX(s.last_taken_date) AS last_stock_out
+      FROM public.godown g
+      LEFT JOIN public.stock s ON s.godown_id = g.id
+      GROUP BY g.id, g.name
+      ORDER BY g.name
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('getGodownSummaryReport error:', err.message);
+    res.status(500).json({ message: 'Failed to fetch report' });
   }
 };

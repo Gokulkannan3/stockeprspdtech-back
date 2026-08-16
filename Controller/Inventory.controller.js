@@ -7,9 +7,9 @@ const pool = new Pool({
   host: process.env.PGHOST,
   port: process.env.PGPORT,
   database: process.env.PGDATABASE,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  // ssl: {
+  //   rejectUnauthorized: false,
+  // },
 });
 
 /* ──────────────────────  PRODUCT  ────────────────────── */
@@ -104,8 +104,12 @@ exports.getProducts = async (req, res) => {
 
     for (const { product_type } of types.rows) {
       const tbl = product_type.toLowerCase().replace(/\s+/g, '_');
-      const rows = await pool.query(`SELECT id, productname, price, per_case, brand FROM public.${tbl}`);
-      all.push(...rows.rows.map(r => ({ ...r, product_type })));
+      try {
+        const rows = await pool.query(`SELECT id, productname, price, per_case, brand FROM public."${tbl}"`);
+        all.push(...rows.rows.map(r => ({ ...r, product_type })));
+      } catch (e) {
+        // Table doesn't exist yet, skip
+      }
     }
     res.json(all);
   } catch (err) {
@@ -118,8 +122,12 @@ exports.getProductsByType = async (req, res) => {
   try {
     const { productType } = req.params;
     const tbl = productType.toLowerCase().replace(/\s+/g, '_');
-    const rows = await pool.query(`SELECT id, productname, price, case_count, per_case, brand FROM public.${tbl} ORDER BY productname`);
-    res.json(rows.rows);
+    try {
+      const rows = await pool.query(`SELECT id, productname, price, per_case, brand FROM public."${tbl}" ORDER BY productname`);
+      res.json(rows.rows);
+    } catch (e) {
+      res.json([]);
+    }
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Failed to fetch products for type' });

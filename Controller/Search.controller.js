@@ -7,9 +7,9 @@ const pool = new Pool({
   host: process.env.PGHOST,
   port: process.env.PGPORT,
   database: process.env.PGDATABASE,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  // ssl: {
+  //   rejectUnauthorized: false,
+  // },
 });
 
 exports.searchProducts = async (req, res) => {
@@ -22,6 +22,7 @@ exports.searchProducts = async (req, res) => {
             s.product_type,
             s.productname,
             s.brand,
+            s.per_case,
             COALESCE(b.agent_name, '-') AS agent_name,
             g.name AS godown_name,
             g.id AS godown_id,

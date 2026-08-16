@@ -8,9 +8,9 @@ const pool = new Pool({
   host: process.env.PGHOST,
   port: process.env.PGPORT,
   database: process.env.PGDATABASE,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  // ssl: {
+  //   rejectUnauthorized: false,
+  // },
 });
 
 const formatDate = (dateInput) => {
@@ -49,16 +49,6 @@ const generatePDFBuffer = (data) => {
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    // ─── DEBUG LOG ───────────────────────────────────────────────
-    console.log('[PDF GENERATOR DEBUG] Received items:', 
-      JSON.stringify(data.items?.map(i => ({
-        name: i.productname,
-        per_case: i.per_case,
-        rate_per_box: i.rate_per_box,
-        amount: i.amount
-      })) || 'NO ITEMS', null, 2));
-    // ──────────────────────────────────────────────────────────────
-
     const safeNum = (val) => (parseFloat(val) || 0).toFixed(2);
     const safeStr = (val) => (val || '').toString();
 
@@ -85,141 +75,142 @@ const generatePDFBuffer = (data) => {
     const grandTotal = parseFloat(data.grandTotal) || 0;
     const totalCases = parseInt(data.totalCases) || 0;
 
-    doc.fontSize(16).font('Helvetica-Bold').text('ESTIMATE', { align: 'center' }).moveDown(1.5);
+    // Title Header
+    doc.fontSize(20).font('Helvetica-Bold').fillColor('#0f172a').text('SALES INVOICE / ESTIMATE', { align: 'center' });
+    doc.fontSize(9).font('Helvetica').fillColor('#64748b').text('OFFICIAL BILLING STATEMENT', { align: 'center' }).moveDown(0.5);
+    doc.moveTo(40, doc.y).lineTo(555, doc.y).lineWidth(1).strokeColor('#cbd5e1').stroke().moveDown(0.8);
 
-    const leftX = 50;
-    const rightX = 350;
-    const tableStartX = leftX;
-    const tableWidth = 490;
-    const colWidths = [35, 130, 45, 45, 55, 65, 65, 50];
+    const leftX = 40;
+    const rightX = 305;
+    const startY = doc.y;
+
+    // Customer Info Box
+    doc.rect(leftX, startY, 250, 70).fillColor('#f8fafc').fill().strokeColor('#cbd5e1').stroke();
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('#64748b').text('CUSTOMER / PARTY DETAILS', leftX + 10, startY + 8);
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#0f172a').text(customer_name, leftX + 10, startY + 20);
+    doc.font('Helvetica').fontSize(9).fillColor('#334155').text(`Address: ${address || '—'}`, leftX + 10, startY + 35);
+    if (gstin) doc.font('Helvetica').fontSize(9).fillColor('#334155').text(`GSTIN: ${gstin}`, leftX + 10, startY + 48);
+
+    // Bill Info Box
+    doc.rect(rightX, startY, 250, 70).fillColor('#f8fafc').fill().strokeColor('#cbd5e1').stroke();
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('#64748b').text('BILL & DISPATCH DETAILS', rightX + 10, startY + 8);
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#0f172a').text(`Bill No: ${bill_number}`, rightX + 10, startY + 20);
+    doc.font('Helvetica').fontSize(9).fillColor('#334155').text(`Date: ${formatDate(bill_date)}`, rightX + 10, startY + 35);
+    doc.font('Helvetica').fontSize(9).fillColor('#334155').text(`Agent: ${agent_name} | Cases: ${totalCases}`, rightX + 10, startY + 48);
+
+    let y = startY + 80;
+    const tableStartX = 40;
+    const tableWidth = 515;
+    const colWidths = [35, 155, 45, 45, 55, 60, 65, 55];
     const rowHeight = 20;
-    const cellPadding = 4;
-    const startY = 100;
+    const cellPadding = 3;
 
-    doc.font('Helvetica-Bold').fontSize(15).text('Customer Information', leftX, startY);
-    doc.font('Helvetica').fontSize(12);
-    doc.text(`Party Name : ${customer_name}`, leftX, startY + 17);
-    doc.text(`Address : ${address}`, leftX, startY + 32);
-    doc.text(`GSTIN : ${gstin}`, leftX, startY + 52);
-
-    doc.font('Helvetica-Bold').fontSize(15).text('Bill Details', rightX, startY, { align: 'right' });
-    doc.font('Helvetica').fontSize(12);
-    doc.text(`Bill NO : ${bill_number}`, rightX, startY + 17, { align: 'right' });
-    doc.text(`Bill DATE : ${formatDate(bill_date)}`, rightX, startY + 32, { align: 'right' });
-    doc.text(`Agent Name : ${agent_name}`, rightX, startY + 47, { align: 'right' });
-    doc.text(`L.R. NUMBER : ${lr_number}`, rightX, startY + 62, { align: 'right' });
-    doc.font('Helvetica-Bold').fontSize(15).text(`No. of Cases : ${totalCases}`, rightX, startY + 77, { align: 'right' });
-
-    let y = startY + 105;
-    const headers = ['S.No', 'Product', 'Case', 'Per', 'Qty', 'Rate', 'Amount', 'From'];
+    const headers = ['S.No', 'Product Name', 'Cases', 'Per', 'Qty', 'Rate', 'Amount', 'Godown'];
     const verticalLines = [tableStartX];
     colWidths.forEach(w => verticalLines.push(verticalLines[verticalLines.length - 1] + w));
-    let x = tableStartX;
 
+    // Table Header
     const headerTop = y;
     const headerBottom = y + rowHeight;
-    doc.lineWidth(0.8).strokeColor('black');
-    doc.moveTo(tableStartX, headerTop).lineTo(tableStartX + tableWidth, headerTop).stroke();
-    doc.moveTo(tableStartX, headerBottom).lineTo(tableStartX + tableWidth, headerBottom).stroke();
-    verticalLines.forEach(vx => doc.moveTo(vx, headerTop).lineTo(vx, headerBottom).stroke());
-
-    doc.font('Helvetica-Bold').fontSize(10);
+    doc.rect(tableStartX, headerTop, tableWidth, rowHeight).fillColor('#1e293b').fill();
+    doc.fillColor('white').font('Helvetica-Bold').fontSize(9);
+    let x = tableStartX;
     headers.forEach((h, i) => {
-      doc.text(h, x + cellPadding, y + cellPadding, {
+      doc.text(h, x + cellPadding, y + cellPadding + 2, {
         width: colWidths[i] - 2 * cellPadding,
         align: 'center'
       });
       x += colWidths[i];
     });
 
-    y += rowHeight + 1;
+    y += rowHeight;
 
+    // Table Rows
     doc.font('Helvetica').fontSize(9);
-    items.forEach((item) => {
+    items.forEach((item, idx) => {
       x = tableStartX;
       const rate = parseFloat(item.rate_per_box) || 0;
       const amount = parseFloat(item.amount) || 0;
 
-      // ─── IMPORTANT: EXACT COLUMN ORDER ─────────────────────────────
       const row = [
-        (item.s_no || '').toString(),           // S.No
-        item.productname || '',                 // Product
-        (item.cases || 0).toString(),           // Case
-        (item.per_case || 1).toString(),        // Per
-        (item.quantity || 0).toString(),        // Qty
-        rate.toFixed(2),                        // Rate ← MUST be rate_per_box
-        amount.toFixed(2),                      // Amount
-        item.godown || from                     // From
+        (item.s_no || idx + 1).toString(),
+        item.productname || '',
+        (item.cases || 0).toString(),
+        (item.per_case || 1).toString(),
+        (item.quantity || 0).toString(),
+        rate.toFixed(2),
+        amount.toFixed(2),
+        item.godown || from
       ];
-      // ──────────────────────────────────────────────────────────────
 
-      const rowTop = y;
-      const rowBottom = y + rowHeight;
-      doc.lineWidth(0.4).strokeColor('black');
-      doc.moveTo(tableStartX, rowTop).lineTo(tableStartX + tableWidth, rowTop).stroke();
-      doc.moveTo(tableStartX, rowBottom).lineTo(tableStartX + tableWidth, rowBottom).stroke();
-      verticalLines.forEach(vx => doc.moveTo(vx, rowTop).lineTo(vx, rowBottom).stroke());
+      const rowBg = idx % 2 === 0 ? '#f8fafc' : '#ffffff';
+      doc.rect(tableStartX, y, tableWidth, rowHeight).fillColor(rowBg).fill().strokeColor('#e2e8f0').stroke();
 
+      doc.fillColor('#334155');
       row.forEach((text, i) => {
-        doc.text(text, x + cellPadding, y + cellPadding, {
+        const align = (i === 1) ? 'left' : (i >= 5 && i <= 6 ? 'right' : 'center');
+        doc.text(text, x + cellPadding, y + cellPadding + 2, {
           width: colWidths[i] - 2 * cellPadding,
-          align: 'center'
+          align
         });
         x += colWidths[i];
       });
 
-      y += rowHeight + 1;
+      y += rowHeight;
     });
-
-    doc.lineWidth(0.8).moveTo(tableStartX, y - 1).lineTo(tableStartX + tableWidth, y - 1).stroke();
 
     y += 15;
     const transportStartY = y;
-    doc.font('Helvetica-Bold').fontSize(15).text('Transport Details', leftX, transportStartY);
-    doc.font('Helvetica').fontSize(10);
-    doc.text(`From : ${from}`, leftX, transportStartY + 15);
-    doc.text(`To : ${to}`, leftX, transportStartY + 30);
-    doc.text(`Through : ${through}`, leftX, transportStartY + 45);
 
+    // Transport Details Box
+    doc.rect(40, transportStartY, 245, 65).fillColor('#f8fafc').fill().strokeColor('#cbd5e1').stroke();
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('#64748b').text('TRANSPORT DETAILS', 50, transportStartY + 8);
+    doc.font('Helvetica').fontSize(9).fillColor('#334155');
+    doc.text(`From: ${from}`, 50, transportStartY + 22);
+    doc.text(`To: ${to}`, 50, transportStartY + 35);
+    doc.text(`Carrier: ${through || '—'}`, 50, transportStartY + 48);
+
+    // Summary Totals Box
+    const labelX = 305;
+    const valueX = 450;
+    const valueWidth = 100;
     const totals = [
       ['GOODS VALUE', subtotal],
       ...(addlDiscountAmt > 0 ? [['SPECIAL DISCOUNT', `-${addlDiscountAmt}`]] : []),
       ['SUB TOTAL', subtotal],
       ...(packingCharges > 0 ? [[`PACKING @ ${packing_percent}%`, packingCharges]] : []),
-      ['SUB TOTAL', (parseFloat(subtotal) + parseFloat(packingCharges)).toFixed(2)],
       ['TAXABLE VALUE', taxableUsed],
       ...(cgstAmt > 0 ? [['CGST @ 9%', cgstAmt]] : []),
       ...(sgstAmt > 0 ? [['SGST @ 9%', sgstAmt]] : []),
       ...(igstAmt > 0 ? [['IGST @ 18%', igstAmt]] : []),
       ['ROUND OFF', roundOff],
-      ['']
     ];
 
     let ty = transportStartY;
-    const labelX = rightX;
-    const valueX = rightX + 110;
-    const valueWidth = 70;
-    doc.font('Helvetica').fontSize(10);
+    doc.font('Helvetica').fontSize(9);
     totals.forEach(([label, value]) => {
       if (!label) return;
-      const lineY = ty + 15;
-      doc.text(label, labelX, lineY, { align: 'left' });
+      doc.fillColor('#475569').text(label, labelX, ty, { align: 'left' });
       if (value !== undefined) {
-        doc.text(value, valueX, lineY, { width: valueWidth, align: 'right' });
+        doc.fillColor('#0f172a').font('Helvetica-Bold').text(value, valueX, ty, { width: valueWidth, align: 'right' }).font('Helvetica');
       }
-      ty += 15;
+      ty += 14;
     });
 
-    const netY = ty + 10;
-    doc.font('Helvetica-Bold').fontSize(12)
-       .text('NET AMOUNT', labelX, netY)
-       .text(`${grandTotal.toFixed(2)}`, valueX, netY, { width: valueWidth, align: 'right' });
+    const netY = ty + 4;
+    doc.rect(labelX, netY - 2, 250, 22).fillColor('#1e293b').fill();
+    doc.font('Helvetica-Bold').fontSize(10).fillColor('white')
+      .text('NET GRAND TOTAL', labelX + 8, netY + 4)
+      .text(`₹${grandTotal.toFixed(2)}`, valueX, netY + 4, { width: valueWidth - 8, align: 'right' });
 
-    const footerY = Math.max(y, ty) + 50;
-    doc.fontSize(10).font('Helvetica')
-       .text('Note:', leftX, footerY)
-       .text('1. Company not responsible for transit loss/damage', leftX + 10, footerY + 12)
-       .text('2. Subject to Sivakasi jurisdiction. E.& O.E', leftX + 10, footerY + 24);
+    // Footer & Signature
+    const footerY = Math.max(y, ty) + 40;
+    doc.font('Helvetica').fontSize(8).fillColor('#64748b');
+    doc.text('Note: 1. Goods once sold will not be taken back. 2. Subject to Sivakasi Jurisdiction.', 40, footerY);
+
+    const sigY = footerY + 20;
+    doc.text('Authorised Signatory', 420, sigY + 25);
+    doc.moveTo(420, sigY + 20).lineTo(555, sigY + 20).strokeColor('#94a3b8').stroke();
 
     doc.end();
   });
@@ -364,6 +355,7 @@ exports.createBooking = async (req, res) => {
         s_no: idx + 1,
         productname: productname.trim(),
         brand: brand?.trim() || '',
+        product_type: item.product_type?.trim() || '',
         cases: Number(cases),
         per_case: Number(per_case),
         quantity: qty,
@@ -472,12 +464,12 @@ exports.getBookingPDF = async (req, res) => {
     const booking = result.rows[0];
 
     // SAFE PARSING - handles both string and object
-    const items = typeof booking.items === 'string' 
-      ? JSON.parse(booking.items || '[]') 
+    const items = typeof booking.items === 'string'
+      ? JSON.parse(booking.items || '[]')
       : (Array.isArray(booking.items) ? booking.items : []);
 
-    const extra = typeof booking.extra_charges === 'string' 
-      ? JSON.parse(booking.extra_charges || '{}') 
+    const extra = typeof booking.extra_charges === 'string'
+      ? JSON.parse(booking.extra_charges || '{}')
       : (booking.extra_charges || {});
 
     let subtotal = 0;
@@ -812,9 +804,9 @@ exports.editBooking = async (req, res) => {
     );
 
     await client.query('COMMIT');
-    res.json({ 
+    res.json({
       success: true,
-      message: 'Booking updated successfully' 
+      message: 'Booking updated successfully'
     });
   } catch (err) {
     await client.query('ROLLBACK');

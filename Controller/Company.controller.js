@@ -23,9 +23,9 @@ const pool = new Pool({
   host: process.env.PGHOST,
   port: process.env.PGPORT,
   database: process.env.PGDATABASE,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  // ssl: {
+  //   rejectUnauthorized: false,
+  // },
 });
 
 const upload = multer({ storage });
@@ -86,14 +86,14 @@ exports.createCompany = async (req, res) => {
 
     const {
       company_name = 'NISHA TRADERS',
-      address = '', 
-      gstin = '', 
+      address = '',
+      gstin = '',
       email = '',
       mobile = '',  // ← Added mobile
       tagline = '',
       bank_name = 'Tamilnad Mercantile Bank Ltd.',
-      branch = 'SIVAKASI', 
-      account_no = '', 
+      branch = 'SIVAKASI',
+      account_no = '',
       ifsc_code = ''
     } = req.body;
 
@@ -135,15 +135,15 @@ exports.updateCompany = async (req, res) => {
     if (err) return res.status(400).json({ message: err.message });
 
     const {
-      company_name, 
-      address, 
-      gstin, 
+      company_name,
+      address,
+      gstin,
       email,
       mobile = '',  // ← Added mobile with default
       tagline = '',
-      bank_name, 
-      branch, 
-      account_no, 
+      bank_name,
+      branch,
+      account_no,
       ifsc_code
     } = req.body;
 

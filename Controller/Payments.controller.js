@@ -7,10 +7,14 @@ const pool = new Pool({
   host: process.env.PGHOST,
   port: process.env.PGPORT,
   database: process.env.PGDATABASE,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  // ssl: {
+  //   rejectUnauthorized: false,
+  // },
 });
+
+// Add is_closed to bookings if it doesn't exist
+pool.query(`ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS is_closed BOOLEAN DEFAULT FALSE`)
+  .catch(err => console.error('Booking migration error:', err));
 
 exports.createAdmin = async (req, res) => {
   const { username } = req.body;
@@ -319,6 +323,119 @@ exports.getTransactions = async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error("getTransactions error:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ─── Get Customer Bills (for customer-level tally, like supplier tally) ───────────
+exports.getCustomerBills = async (req, res) => {
+  try {
+    const { customer } = req.query;
+    let whereClause = '';
+    const params = [];
+    if (customer) {
+      params.push(customer);
+      whereClause = `WHERE LOWER(b.customer_name) = LOWER($1)`;
+    }
+
+    const { rows } = await pool.query(`
+      SELECT
+        b.id,
+        b.bill_number,
+        b.bill_date,
+        b.customer_name,
+        b.address,
+        b.is_closed,
+        b.items,
+        b.extra_charges,
+        b.total,
+        COALESCE(SUM(p.amount_paid), 0)::NUMERIC AS paid,
+        (b.total - COALESCE(SUM(p.amount_paid), 0))::NUMERIC AS balance
+      FROM public.bookings b
+      LEFT JOIN public.payments p ON p.booking_id = b.id
+      ${whereClause}
+      GROUP BY b.id
+      ORDER BY b.customer_name, b.bill_date DESC
+    `, params);
+
+    // Compute cases and tax per bill
+    const result = rows.map(r => {
+      const items = typeof r.items === 'string' ? JSON.parse(r.items || '[]') : r.items || [];
+      const extra = typeof r.extra_charges === 'string' ? JSON.parse(r.extra_charges) : r.extra_charges || {};
+      const totalCases = items.reduce((s, i) => s + (parseInt(i.cases) || 0), 0);
+
+      let subtotal = items.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
+      const packing_percent = parseFloat(extra.packing_percent) || 3.0;
+      const packingCharges = extra.apply_processing_fee ? subtotal * (packing_percent / 100) : 0;
+      const extraTaxable = parseFloat(extra.taxable_value) || 0;
+      const taxableAmount = subtotal + packingCharges + extraTaxable;
+      const additional_discount = parseFloat(extra.additional_discount) || 0;
+      const discountAmt = taxableAmount * (additional_discount / 100);
+      const netTaxable = taxableAmount - discountAmt;
+      let cgst = 0, sgst = 0, igst = 0;
+      if (extra.apply_igst) igst = netTaxable * 0.18;
+      else if (extra.apply_cgst && extra.apply_sgst) { cgst = netTaxable * 0.09; sgst = netTaxable * 0.09; }
+      const taxAmount = parseFloat((cgst + sgst + igst).toFixed(2));
+
+      return {
+        id: r.id,
+        bill_number: r.bill_number,
+        bill_date: r.bill_date,
+        customer_name: r.customer_name,
+        address: r.address,
+        is_closed: r.is_closed,
+        total: parseFloat(r.total) || 0,
+        paid: parseFloat(r.paid) || 0,
+        balance: parseFloat(r.balance) || 0,
+        total_cases: totalCases,
+        tax_amount: taxAmount,
+      };
+    });
+
+    // If no customer filter, group by customer
+    if (!customer) {
+      const grouped = {};
+      result.forEach(bill => {
+        if (!grouped[bill.customer_name]) {
+          grouped[bill.customer_name] = {
+            customer_name: bill.customer_name,
+            address: bill.address,
+            total_bills: 0,
+            open_bills: 0,
+            total_billed: 0,
+            total_paid: 0,
+            total_balance: 0,
+          };
+        }
+        const g = grouped[bill.customer_name];
+        g.total_bills += 1;
+        if (!bill.is_closed) g.open_bills += 1;
+        g.total_billed += bill.total;
+        g.total_paid += bill.paid;
+        g.total_balance += bill.is_closed ? 0 : bill.balance;
+      });
+      return res.json(Object.values(grouped));
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error('getCustomerBills error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ─── Close / Reopen a Customer Bill (Admin action) ────────────────────────────
+exports.closeCustomerBill = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE public.bookings SET is_closed = NOT is_closed WHERE id = $1 RETURNING is_closed`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Bill not found' });
+    res.json({ success: true, is_closed: rows[0].is_closed });
+  } catch (err) {
+    console.error('closeCustomerBill error:', err);
     res.status(500).json({ error: err.message });
   }
 };

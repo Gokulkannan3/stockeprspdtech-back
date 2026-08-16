@@ -1,4 +1,4 @@
-// routes/payments.js (unchanged)
+// routes/payments.js
 const express = require('express');
 const router = express.Router();
 const ctrl = require('../Controller/Payments.controller');
@@ -16,5 +16,11 @@ router.get('/payments/:id', ctrl.getPaymentHistory);
 router.get('/sbooking', ctrl.getsBookings);
 router.get('/dispatch_logs/:order_id', ctrl.getDispatchLogs);
 router.get('/transactions/:id', ctrl.getTransactions);
+
+// Customer-level bill tally (grouped or per customer with ?customer=NAME)
+router.get('/customer-bills', ctrl.getCustomerBills);
+
+// Admin close/reopen a customer bill
+router.patch('/customer-close/:id', ctrl.closeCustomerBill);
 
 module.exports = router;

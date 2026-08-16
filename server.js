@@ -34,6 +34,8 @@ app.use('/api', require('./Router/Delivery.router'));
 app.use('/api', require('./Router/Company.router'));
 app.use('/api/binvent', require('./Router/Binvent.router'));
 app.use('/api/', require('./Router/Billing.router'));
+app.use('/api', require('./Router/Purchase.router'));
+app.use('/api', require('./Router/Reports.router'));
 
 app.use((err, req, res, next) => {
   console.error('🔥 Error:', err.stack || err);

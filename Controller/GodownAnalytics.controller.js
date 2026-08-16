@@ -8,9 +8,9 @@ const pool = new Pool({
   host: process.env.PGHOST,
   port: process.env.PGPORT,
   database: process.env.PGDATABASE,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  // ssl: {
+  //   rejectUnauthorized: false,
+  // },
 });
 
 exports.getAllGodownsAnalytics = async (req, res) => {
@@ -18,7 +18,7 @@ exports.getAllGodownsAnalytics = async (req, res) => {
 
   try {
     const dateFormat = period === 'day' ? 'YYYY-MM-DD' :
-                      period === 'year' ? 'YYYY' : 'YYYY-MM';
+      period === 'year' ? 'YYYY' : 'YYYY-MM';
 
     // 1. Time-based Intake vs Outtake
     const history = await pool.query(`
@@ -44,11 +44,11 @@ exports.getAllGodownsAnalytics = async (req, res) => {
       const key = `${godown_id}-${godown_name}`;
 
       if (!chartData[key]) {
-        chartData[key] = { 
-          id: godown_id, 
-          name: godown_name, 
-          labels: new Set(), 
-          intake: {}, 
+        chartData[key] = {
+          id: godown_id,
+          name: godown_name,
+          labels: new Set(),
+          intake: {},
           outtake: {},
           productIntake: {},   // NEW
           productOuttake: {}   // NEW
@@ -87,10 +87,10 @@ exports.getAllGodownsAnalytics = async (req, res) => {
 
       const val = parseInt(r.cases);
       if (r.action === 'added') {
-        chartData[key].productIntake[r.productname] = 
+        chartData[key].productIntake[r.productname] =
           (chartData[key].productIntake[r.productname] || 0) + val;
       } else {
-        chartData[key].productOuttake[r.productname] = 
+        chartData[key].productOuttake[r.productname] =
           (chartData[key].productOuttake[r.productname] || 0) + val;
       }
     });
